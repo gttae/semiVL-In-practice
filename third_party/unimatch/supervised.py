@@ -38,13 +38,15 @@ parser.add_argument('--port', default=None, type=int)
 
 
 def predict(model, img, mask, mode, cfg, return_logits=False):
+    device = img.device  # 입력 이미지의 장치를 가져옵니다 (CPU 또는 GPU)
+    
     if mode == 'padded_sliding_window':
         grid = cfg['crop_size']
         stride = cfg['stride']
         if stride < 1:
             stride = int(grid * stride)
         b, _, h, w = img.shape
-        final = torch.zeros(b, cfg['nclass'], h, w).cuda()
+        final = torch.zeros(b, cfg['nclass'], h, w, device=device)  # 텐서를 img와 동일한 장치에 생성
         row = 0
         while row < h:
             col = 0
@@ -55,11 +57,11 @@ def predict(model, img, mask, mode, cfg, return_logits=False):
                 x2 = min(w, col + grid)
                 crop_h = y2 - y1
                 crop_w = x2 - x1
-                # print(y1, y2, x1, x2, crop_h, crop_w)
-                cropped_img = torch.zeros((b, 3, grid, grid), device=img.device)
+
+                cropped_img = torch.zeros((b, 3, grid, grid), device=device)
                 cropped_img[:, :, :crop_h, :crop_w] = img[:, :, y1: y2, x1: x2]
 
-                pred = model(cropped_img)
+                pred = model(cropped_img.to(device))
                 final[:, :, y1: y2, x1: x2] += pred.softmax(dim=1)[:, :, :crop_h, :crop_w]
                 col += stride
             row += stride
@@ -73,43 +75,36 @@ def predict(model, img, mask, mode, cfg, return_logits=False):
         num_classes = cfg['nclass']
         h_grids = max(h_img - h_crop + h_stride - 1, 0) // h_stride + 1
         w_grids = max(w_img - w_crop + w_stride - 1, 0) // w_stride + 1
-        preds = img.new_zeros((batch_size, num_classes, h_img, w_img))
-        count_mat = img.new_zeros((batch_size, 1, h_img, w_img))
+        preds = img.new_zeros((batch_size, num_classes, h_img, w_img), device=device)
+        count_mat = img.new_zeros((batch_size, 1, h_img, w_img), device=device)
         for h_idx in range(h_grids):
             for w_idx in range(w_grids):
                 y1 = h_idx * h_stride
                 x1 = w_idx * w_stride
                 y2 = min(y1 + h_crop, h_img)
-                x2 = min(x1 + w_crop, w_img)
+                x2 = min(w1 + w_crop, w_img)
                 y1 = max(y2 - h_crop, 0)
                 x1 = max(x2 - w_crop, 0)
                 crop_img = img[:, :, y1:y2, x1:x2]
-                crop_seg_logit = model(crop_img)
-                preds += F.pad(crop_seg_logit,
-                            (int(x1), int(preds.shape[3] - x2), int(y1),
-                                int(preds.shape[2] - y2)))
+                crop_seg_logit = model(crop_img.to(device))
+                preds += F.pad(crop_seg_logit, (int(x1), int(preds.shape[3] - x2), int(y1), int(preds.shape[2] - y2)))
 
                 count_mat[:, :, y1:y2, x1:x2] += 1
         assert (count_mat == 0).sum() == 0
         preds = preds / count_mat
-        final = mmseg.ops.resize(
-            preds,
-            size=mask.shape[-2:],
-            mode='bilinear',
-            align_corners=True,
-            warning=False)
+        final = mmseg.ops.resize(preds, size=mask.shape[-2:], mode='bilinear', align_corners=True, warning=False)
 
         pred = final.argmax(dim=1)
 
     elif mode == 'sliding_window':
         grid = cfg['crop_size']
         b, _, h, w = img.shape
-        final = torch.zeros(b, cfg['nclass'], h, w).cuda()
+        final = torch.zeros(b, cfg['nclass'], h, w, device=device)
         row = 0
         while row < h:
             col = 0
             while col < w:
-                pred = model(img[:, :, row: min(h, row + grid), col: min(w, col + grid)])
+                pred = model(img[:, :, row: min(h, row + grid), col: min(w, col + grid)].to(device))
                 final[:, :, row: min(h, row + grid), col: min(w, col + grid)] += pred.softmax(dim=1)
                 col += int(grid * 2 / 3)
             row += int(grid * 2 / 3)
@@ -123,13 +118,14 @@ def predict(model, img, mask, mode, cfg, return_logits=False):
             img = img[:, :, start_h:start_h + cfg['crop_size'], start_w:start_w + cfg['crop_size']]
             mask = mask[:, start_h:start_h + cfg['crop_size'], start_w:start_w + cfg['crop_size']]
 
-        final = model(img)
+        final = model(img.to(device))
         pred = final.argmax(dim=1)
         
     if return_logits:
         return pred, final
     else:
         return pred
+
 
 
 def evaluate(model, loader, mode, cfg):
