@@ -157,3 +157,60 @@ def build_model(cfg):
         raise ValueError(model_type)
     
     return model
+
+def build_model2(cfg):
+    model_type = cfg['model']
+    if model_type == 'deeplabv3plus':
+        model = DeepLabV3Plus(cfg)
+    elif 'mmseg.' in model_type:
+        model_type = model_type.replace('mmseg.', '')
+        model_cfg_file = f'configs/_base_/models/{model_type}.py'
+        mmseg_cfg = Config.fromfile(model_cfg_file)
+        mmseg_cfg['model']['decode_head']['num_classes'] = cfg['nclass']
+        if 'zegclip' in model_type or 'vlm' in model_type:
+            if mmseg_cfg['img_size'] != cfg['crop_size']:
+                print('Modify model image_size to match crop_size', cfg['crop_size'])
+                nested_set(mmseg_cfg, 'img_size', cfg['crop_size'])
+                nested_set(mmseg_cfg, 'model.backbone.img_size', (cfg['crop_size'],  cfg['crop_size']))
+                nested_set(mmseg_cfg, 'model.decode_head.img_size', cfg['crop_size'])
+            emb_dataset_prefix = {
+                'pascal': 'voc12_wbg',
+                'cityscapes': 'cityscapes',
+                'coco': 'coco',
+                'ade': 'ade',
+            }[cfg['dataset']]
+            text_embedding_variant = cfg['text_embedding_variant']
+            text_embedding = f'configs/_base_/datasets/text_embedding/{emb_dataset_prefix}_{text_embedding_variant}.npy'
+            nested_set(mmseg_cfg, 'model.load_text_embedding', text_embedding)
+            mcc_text_embedding_variant = cfg['mcc_text']
+            mcc_text_embedding = f'configs/_base_/datasets/text_embedding/{emb_dataset_prefix}_{mcc_text_embedding_variant}.npy'
+            nested_set(mmseg_cfg, 'model.load_mcc_text_embedding', mcc_text_embedding)
+            pl_text_embedding_variant = cfg['pl_text']
+            pl_text_embedding = f'configs/_base_/datasets/text_embedding/{emb_dataset_prefix}_{pl_text_embedding_variant}.npy'
+            nested_set(mmseg_cfg, 'model.load_pl_text_embedding', pl_text_embedding)
+        if mmseg_cfg['model']['decode_head']['type'] == 'ATMSingleHeadSeg':
+            mmseg_cfg['model']['decode_head']['seen_idx'] = list(range(cfg['nclass']))
+            mmseg_cfg['model']['decode_head']['all_idx'] = list(range(cfg['nclass']))
+        if mmseg_cfg['model']['decode_head'].get('loss_decode') is not None and \
+                mmseg_cfg['model']['decode_head']['loss_decode']['type'] == 'SegLossPlus':
+            mmseg_cfg['model']['decode_head']['loss_decode']['num_classes'] = cfg['nclass']
+        #if cfg['clip_encoder'] is not None:
+            #clip_encoder_cfg = Config.fromfile(f'configs/_base_/models/{cfg["clip_encoder"]}.py')
+            #clip_encoder_cfg['img_size'] = mmseg_cfg['img_size']
+            #if cfg.get('mcc_fix_resize_pos'):
+                #clip_encoder_cfg['backbone']['img_size'] = mmseg_cfg['img_size']
+            #mmseg_cfg['model']['clip_encoder'] = clip_encoder_cfg['backbone']
+        if 'model_args' in cfg:
+            mmseg_cfg['model'].update(cfg['model_args'])
+        model = build_segmentor(
+            mmseg_cfg.model,
+            train_cfg=mmseg_cfg.get('train_cfg'),
+            test_cfg=mmseg_cfg.get('test_cfg'))
+        model.disable_dropout = cfg['disable_dropout']
+        model.fp_rate = cfg['fp_rate']
+        model.forward = types.MethodType(forward_wrapper, model)
+        model.init_weights()
+    else:
+        raise ValueError(model_type)
+    
+    return model
